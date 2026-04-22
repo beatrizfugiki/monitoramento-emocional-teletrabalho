@@ -60,6 +60,8 @@ def carregar_dados():
 
     df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
     df = df.dropna(subset=['Timestamp', 'Emotion'])
+    if df.empty:
+        return None
     df['Emotion_PT'] = df['Emotion'].map(EMOCAO_MAP)
 
     if 'PessoaID'    not in df.columns: df['PessoaID']    = 'P0'
@@ -67,8 +69,7 @@ def carregar_dados():
     if 'Wellness'    not in df.columns: df['Wellness']    = None
     if 'BurnoutRisk' not in df.columns: df['BurnoutRisk'] = None
 
-    if df['Wellness'] is not None:
-        df['Wellness'] = pd.to_numeric(df['Wellness'], errors='coerce')
+    df['Wellness'] = pd.to_numeric(df['Wellness'], errors='coerce')
     df['BurnoutRisk'] = pd.to_numeric(df['BurnoutRisk'], errors='coerce')
 
     return df
@@ -89,11 +90,18 @@ wellness = round(max(0.0, min(100.0, 50.0 + (soma_pesos / total) * 50.0)), 1)
 emo_dominante = df['Emotion'].value_counts().idxmax()
 
 corte = pd.Timestamp.now() - pd.Timedelta(seconds=30)
-pessoas = max(df[df['Timestamp'] >= corte]['PessoaID'].nunique(), 1)
+pessoas = df[df['Timestamp'] >= corte]['PessoaID'].nunique()
 
 # Risco de burnout: usa coluna salva se disponível, senão calcula a partir das emoções
 if df['BurnoutRisk'].notna().any():
-    burnout = round(df['BurnoutRisk'].dropna().iloc[-1], 1)
+    serie_burnout = df['BurnoutRisk'].dropna()
+    if not serie_burnout.empty:
+        burnout = round(serie_burnout.iloc[-1], 1)
+    else:
+        neg_count = df['Emotion'].isin(EMOCOES_NEGATIVAS).sum()
+        pontos_emocao   = (neg_count / total) * 60.0
+        pontos_wellness = max(0.0, (100.0 - wellness) / 100.0 * 30.0)
+        burnout = round(min(100.0, pontos_emocao + pontos_wellness), 1)
 else:
     neg_count = df['Emotion'].isin(EMOCOES_NEGATIVAS).sum()
     pontos_emocao   = (neg_count / total) * 60.0

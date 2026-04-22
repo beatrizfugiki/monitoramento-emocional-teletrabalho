@@ -86,6 +86,14 @@ def tocar_alerta():
             winsound.Beep(880, 600)
         except Exception:
             pass
+    elif sistema == 'Linux':
+        # Tenta utilitarios comuns de audio sem bloquear o loop principal.
+        for cmd in (
+            "paplay /usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga >/dev/null 2>&1 &",
+            "aplay /usr/share/sounds/alsa/Front_Center.wav >/dev/null 2>&1 &",
+        ):
+            if os.system(cmd) == 0:
+                break
 
 def calcular_wellness(counter):
     total = sum(counter.values())
@@ -121,8 +129,11 @@ def detectar_olhos(face_roi):
         regiao_olhos = gray[:int(h * 0.6), :]
         olhos = eye_cascade.detectMultiScale(regiao_olhos, 1.1, 3, minSize=(15, 15))
         return len(olhos) > 0
-    except Exception:
-        return True  # Assume que viu olho se houver erro
+    except Exception as e:
+        if not getattr(detectar_olhos, '_erro_reportado', False):
+            print(f"Aviso: falha na detecao de olhos ({e}).")
+            detectar_olhos._erro_reportado = True
+        return False
 
 def salvar_registros_csv(registros):
     """Escreve múltiplos registros de uma vez"""
@@ -246,11 +257,20 @@ class TrackerRosto:
         self.ids_centros = {}
         self.estados = {}
         self.frame_visto = {}
+        self.historico_emocoes = Counter()
+        self.historico_piscadas = 0
+        self.historico_alertas_fadiga = 0
 
     def atualizar(self, centros, frame_count, max_ausente=90):
         for rid in list(self.ids_centros):
             if frame_count - self.frame_visto.get(rid, 0) > max_ausente:
+                estado_antigo = self.estados.pop(rid, None)
+                if estado_antigo is not None:
+                    self.historico_emocoes += estado_antigo.emotion_counter
+                    self.historico_piscadas += estado_antigo.piscadas
+                    self.historico_alertas_fadiga += estado_antigo.alertas_fadiga_total
                 del self.ids_centros[rid]
+                self.frame_visto.pop(rid, None)
 
         ids_resultado, usados = [], set()
 
@@ -279,16 +299,16 @@ class TrackerRosto:
         return ids_resultado
 
     def emotion_counter_global(self):
-        total = Counter()
+        total = Counter(self.historico_emocoes)
         for e in self.estados.values():
             total += e.emotion_counter
         return total
 
     def piscadas_total(self):
-        return sum(e.piscadas for e in self.estados.values())
+        return self.historico_piscadas + sum(e.piscadas for e in self.estados.values())
 
     def alertas_fadiga_total(self):
-        return sum(e.alertas_fadiga_total for e in self.estados.values())
+        return self.historico_alertas_fadiga + sum(e.alertas_fadiga_total for e in self.estados.values())
 
 # ─── Loop principal ──────────────────────────────────────────────────────────────
 
@@ -296,6 +316,7 @@ tracker = TrackerRosto()
 frame_count = 0
 modo_privacidade = False
 buffer_csv = []  # Buffer para escrever CSV em lotes
+erros_deepface = 0
 
 print("Iniciando Monitoramento...  |  'q' = sair  |  'p' = modo privacidade")
 
@@ -369,7 +390,9 @@ try:
                         estado.alerta_ativo = False
 
                 except Exception as e:
-                    pass  # Silencia erros do DeepFace
+                    erros_deepface += 1
+                    if erros_deepface <= 3 or erros_deepface % 50 == 0:
+                        print(f"Aviso: falha na analise emocional ({erros_deepface}): {e}")
 
             # Renderização
             if modo_privacidade and face_roi.size > 0:
@@ -431,6 +454,17 @@ except KeyboardInterrupt:
     print("\n⏹ Monitoramento interrompido pelo usuário")
 finally:
     # Salva registros restantes no buffer
+    if buffer_csv:
+        salvar_registros_csv(buffer_csv)
+    
+    cap.release()
+    cv2.destroyAllWindows()
+
+    # ─── Relatório Final ─────────────────────────────────────────────────────────────
+    emotion_global = tracker.emotion_counter_global()
+    wellness_final = calcular_wellness(emotion_global)
+    burnout_final  = calcular_risco_burnout(emotion_global, tracker.alertas_fadiga_total())
+    gerar_relatorio(emotion_global, wellness_final, tracker.piscadas_total(), burnout_final)    # Salva registros restantes no buffer
     if buffer_csv:
         salvar_registros_csv(buffer_csv)
     
