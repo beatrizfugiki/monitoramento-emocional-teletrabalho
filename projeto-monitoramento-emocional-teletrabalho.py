@@ -18,6 +18,11 @@ FRAMES_PISCAR = 3
 LIMIAR_PISCADAS_MIN = 25
 CSV_BUFFER_SIZE = 32  # Escreve a cada 32 registros (≈4 segundos)
 
+# Limiares de risco de burnout (0-100)
+LIMIAR_BURNOUT_BAIXO    = 25
+LIMIAR_BURNOUT_MODERADO = 50
+LIMIAR_BURNOUT_ALTO     = 75
+
 EMOCAO_MAP = {
     'happy':    ('Feliz',    (0, 220, 0)),
     'neutral':  ('Neutro',   (200, 200, 200)),
@@ -44,7 +49,7 @@ eye_cascade = cv2.CascadeClassifier(
 
 # ─── CSV ────────────────────────────────────────────────────────────────────────
 
-COLUNAS_CSV = ['Timestamp', 'PessoaID', 'Emotion', 'Confidence', 'Wellness']
+COLUNAS_CSV = ['Timestamp', 'PessoaID', 'Emotion', 'Confidence', 'Wellness', 'BurnoutRisk']
 
 def inicializar_csv():
     if os.path.isfile(LOG_FILE):
@@ -89,6 +94,25 @@ def calcular_wellness(counter):
     soma = sum(PESOS_WELLNESS.get(e, 0) * c for e, c in counter.items())
     return round(max(0.0, min(100.0, 50.0 + (soma / total) * 50.0)), 1)
 
+def calcular_risco_burnout(counter, alertas_fadiga=0):
+    """Índice de risco de burnout (0-100).
+    Componentes: 60% emoções negativas + 30% wellness invertido + 10% fadiga ocular.
+    """
+    total = sum(counter.values())
+    if total == 0:
+        return 0.0
+    neg = sum(counter.get(e, 0) for e in EMOCOES_NEGATIVAS)
+    pontos_emocao   = (neg / total) * 60.0
+    pontos_wellness = max(0.0, (100.0 - calcular_wellness(counter)) / 100.0 * 30.0)
+    pontos_fadiga   = min(alertas_fadiga * 5.0, 10.0)
+    return round(min(100.0, pontos_emocao + pontos_wellness + pontos_fadiga), 1)
+
+def classificar_burnout(risco):
+    if risco < LIMIAR_BURNOUT_BAIXO:    return "Baixo",    (0, 200, 0)
+    if risco < LIMIAR_BURNOUT_MODERADO: return "Moderado", (0, 165, 255)
+    if risco < LIMIAR_BURNOUT_ALTO:     return "Alto",     (30, 100, 255)
+    return "Crítico", (0, 0, 220)
+
 def detectar_olhos(face_roi):
     """Retorna True se ao menos um olho for detectado."""
     try:
@@ -110,8 +134,11 @@ def salvar_registros_csv(registros):
         except Exception as e:
             print(f"Erro ao salvar CSV: {e}")
 
-def gerar_relatorio(emotion_counter, wellness, piscadas_total):
+def gerar_relatorio(emotion_counter, wellness, piscadas_total, burnout_risk=0.0):
     total = sum(emotion_counter.values())
+    nivel_b = ("Baixo" if burnout_risk < LIMIAR_BURNOUT_BAIXO else
+               "Moderado" if burnout_risk < LIMIAR_BURNOUT_MODERADO else
+               "Alto" if burnout_risk < LIMIAR_BURNOUT_ALTO else "Crítico")
     print("\n" + "=" * 47)
     print("   RELATÓRIO DE SESSÃO — TELETRABALHO")
     print("=" * 47)
@@ -120,6 +147,7 @@ def gerar_relatorio(emotion_counter, wellness, piscadas_total):
         pct = c / total * 100 if total > 0 else 0
         print(f"   {label:<15}: {c:<5} ({pct:.1f}%)")
     print(f"\n   Wellness Score  : {wellness:.1f}/100")
+    print(f"   Risco de Burnout: {nivel_b} ({burnout_risk:.1f}/100)")
     print(f"   Piscadas totais : {piscadas_total}")
     print("=" * 47)
     print(f"   Dados salvos em : {LOG_FILE}")
@@ -127,7 +155,7 @@ def gerar_relatorio(emotion_counter, wellness, piscadas_total):
     if total == 0:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     fig.suptitle("Relatório Emocional — Sessão de Teletrabalho", fontsize=14, fontweight='bold')
 
     labels = [EMOCAO_MAP.get(e, (e.capitalize(),))[0] for e in emotion_counter]
@@ -145,6 +173,16 @@ def gerar_relatorio(emotion_counter, wellness, piscadas_total):
     axes[1].axvline(x=70, color='#00b300', linestyle='--', alpha=0.5, label='Meta (70)')
     axes[1].legend(loc='lower right')
     for spine in axes[1].spines.values():
+        spine.set_visible(False)
+
+    cor_b = '#00b300' if burnout_risk < 25 else '#ff9900' if burnout_risk < 50 else '#ff4400' if burnout_risk < 75 else '#cc0000'
+    axes[2].barh(['Burnout'], [burnout_risk], color=cor_b, height=0.4)
+    axes[2].barh(['Burnout'], [100 - burnout_risk], left=[burnout_risk], color='#e0e0e0', height=0.4)
+    axes[2].set_xlim(0, 100)
+    axes[2].set_title(f"Risco de Burnout: {nivel_b} ({burnout_risk:.1f} / 100)")
+    axes[2].axvline(x=LIMIAR_BURNOUT_ALTO, color='#cc0000', linestyle='--', alpha=0.5, label='Crítico (75)')
+    axes[2].legend(loc='lower right')
+    for spine in axes[2].spines.values():
         spine.set_visible(False)
 
     plt.tight_layout()
@@ -173,6 +211,7 @@ class EstadoPessoa:
         self.inicio_janela = datetime.datetime.now()
         self.alerta_fadiga = False
         self.alerta_fadiga_timestamp = None
+        self.alertas_fadiga_total = 0
 
     def atualizar_piscada(self, olho_detectado):
         """Atualiza contagem de piscadas e detecta fadiga"""
@@ -190,6 +229,7 @@ class EstadoPessoa:
             if self.piscadas_janela > LIMIAR_PISCADAS_MIN:
                 self.alerta_fadiga = True
                 self.alerta_fadiga_timestamp = agora
+                self.alertas_fadiga_total += 1
             self.piscadas_janela = 0
             self.inicio_janela = agora
         
@@ -246,6 +286,9 @@ class TrackerRosto:
 
     def piscadas_total(self):
         return sum(e.piscadas for e in self.estados.values())
+
+    def alertas_fadiga_total(self):
+        return sum(e.alertas_fadiga_total for e in self.estados.values())
 
 # ─── Loop principal ──────────────────────────────────────────────────────────────
 
@@ -307,10 +350,11 @@ try:
                     estado.emotion_counter[emo] += 1
 
                     wellness_atual = calcular_wellness(estado.emotion_counter)
+                    burnout_atual = calcular_risco_burnout(estado.emotion_counter, estado.alertas_fadiga_total)
                     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    
+
                     # Adiciona ao buffer em vez de escrever imediatamente
-                    buffer_csv.append([ts, f"P{pid}", emo, f"{confidence:.2f}", f"{wellness_atual:.1f}"])
+                    buffer_csv.append([ts, f"P{pid}", emo, f"{confidence:.2f}", f"{wellness_atual:.1f}", f"{burnout_atual:.1f}"])
 
                     # Alerta de emoção negativa (usa total_seconds())
                     if emo in EMOCOES_NEGATIVAS:
@@ -343,6 +387,12 @@ try:
             cv2.putText(frame, f"Piscadas: {estado.piscadas}",
                         (x, min(y + h + 18, h_frame - 5)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 50), 1)
+
+            risco_b = calcular_risco_burnout(estado.emotion_counter, estado.alertas_fadiga_total)
+            nivel_b, cor_b = classificar_burnout(risco_b)
+            cv2.putText(frame, f"Burnout: {nivel_b} ({risco_b:.0f}%)",
+                        (x, min(y + h + 36, h_frame - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, cor_b, 1)
 
             if estado.alerta_ativo:
                 overlay = frame.copy()
@@ -390,4 +440,5 @@ finally:
     # ─── Relatório Final ─────────────────────────────────────────────────────────────
     emotion_global = tracker.emotion_counter_global()
     wellness_final = calcular_wellness(emotion_global)
-    gerar_relatorio(emotion_global, wellness_final, tracker.piscadas_total())
+    burnout_final  = calcular_risco_burnout(emotion_global, tracker.alertas_fadiga_total())
+    gerar_relatorio(emotion_global, wellness_final, tracker.piscadas_total(), burnout_final)

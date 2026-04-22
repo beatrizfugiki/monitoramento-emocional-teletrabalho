@@ -18,6 +18,11 @@ PESOS_WELLNESS = {
     'sad': -0.6, 'fear': -0.7, 'disgust': -0.5, 'angry': -0.8,
 }
 
+EMOCOES_NEGATIVAS = {'sad', 'angry', 'fear', 'disgust'}
+LIMIAR_BURNOUT_BAIXO    = 25
+LIMIAR_BURNOUT_MODERADO = 50
+LIMIAR_BURNOUT_ALTO     = 75
+
 COR_EMOCAO = {
     'happy': '#00DC00', 'neutral': '#AAAAAA', 'sad': '#DC5000',
     'angry': '#4444FF', 'fear': '#008CFF', 'disgust': '#009090', 'surprise': '#FFD600',
@@ -57,12 +62,14 @@ def carregar_dados():
     df = df.dropna(subset=['Timestamp', 'Emotion'])
     df['Emotion_PT'] = df['Emotion'].map(EMOCAO_MAP)
 
-    if 'PessoaID'   not in df.columns: df['PessoaID']   = 'P0'
-    if 'Confidence' not in df.columns: df['Confidence'] = None
-    if 'Wellness'   not in df.columns: df['Wellness']   = None
+    if 'PessoaID'    not in df.columns: df['PessoaID']    = 'P0'
+    if 'Confidence'  not in df.columns: df['Confidence']  = None
+    if 'Wellness'    not in df.columns: df['Wellness']    = None
+    if 'BurnoutRisk' not in df.columns: df['BurnoutRisk'] = None
 
     if df['Wellness'] is not None:
         df['Wellness'] = pd.to_numeric(df['Wellness'], errors='coerce')
+    df['BurnoutRisk'] = pd.to_numeric(df['BurnoutRisk'], errors='coerce')
 
     return df
 
@@ -84,10 +91,24 @@ emo_dominante = df['Emotion'].value_counts().idxmax()
 corte = pd.Timestamp.now() - pd.Timedelta(seconds=30)
 pessoas = max(df[df['Timestamp'] >= corte]['PessoaID'].nunique(), 1)
 
+# Risco de burnout: usa coluna salva se disponível, senão calcula a partir das emoções
+if df['BurnoutRisk'].notna().any():
+    burnout = round(df['BurnoutRisk'].dropna().iloc[-1], 1)
+else:
+    neg_count = df['Emotion'].isin(EMOCOES_NEGATIVAS).sum()
+    pontos_emocao   = (neg_count / total) * 60.0
+    pontos_wellness = max(0.0, (100.0 - wellness) / 100.0 * 30.0)
+    burnout = round(min(100.0, pontos_emocao + pontos_wellness), 1)
+
+burnout_nivel = ("Baixo" if burnout < LIMIAR_BURNOUT_BAIXO else
+                 "Moderado" if burnout < LIMIAR_BURNOUT_MODERADO else
+                 "Alto" if burnout < LIMIAR_BURNOUT_ALTO else "Crítico")
+burnout_cor   = "normal" if burnout < LIMIAR_BURNOUT_BAIXO else "off" if burnout < LIMIAR_BURNOUT_MODERADO else "inverse"
+
 wellness_status  = "Bom"      if wellness >= 70 else "Atenção" if wellness >= 40 else "Crítico"
 wellness_d_color = "normal"   if wellness >= 70 else "off"     if wellness >= 40 else "inverse"
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
     st.metric("Total de análises", total)
 with c2:
@@ -97,6 +118,9 @@ with c3:
               delta=wellness_status, delta_color=wellness_d_color)
 with c4:
     st.metric("Pessoas ativas (30 s)", pessoas)
+with c5:
+    st.metric("Risco de Burnout", f"{burnout_nivel} ({burnout:.0f}%)",
+              delta=burnout_nivel, delta_color=burnout_cor)
 
 st.divider()
 
@@ -160,6 +184,32 @@ with tab1:
                        annotation_text="Neutro", annotation_position="right")
         st.plotly_chart(fig2, width='content')
 
+    # Linha do tempo do risco de burnout
+    df_b = df[df['BurnoutRisk'].notna()].tail(300).copy() if df['BurnoutRisk'].notna().any() else None
+    if df_b is not None and not df_b.empty:
+        st.subheader("Evolução do Risco de Burnout")
+        fig3 = go.Figure()
+        fig3.add_hrect(y0=0,  y1=25, fillcolor="rgba(0,200,0,0.07)",   line_width=0)
+        fig3.add_hrect(y0=25, y1=50, fillcolor="rgba(255,165,0,0.07)", line_width=0)
+        fig3.add_hrect(y0=50, y1=75, fillcolor="rgba(255,80,0,0.07)",  line_width=0)
+        fig3.add_hrect(y0=75, y1=100, fillcolor="rgba(200,0,0,0.08)",  line_width=0)
+        fig3.add_trace(go.Scatter(
+            x=df_b['Timestamp'], y=df_b['BurnoutRisk'],
+            mode='lines', fill='tozeroy',
+            line=dict(color='#cc3300', width=2),
+            fillcolor='rgba(204,51,0,0.15)',
+            hovertemplate='%{x|%H:%M:%S}<br>Burnout: %{y:.1f}%<extra></extra>',
+        ))
+        fig3.add_hline(y=LIMIAR_BURNOUT_ALTO, line_dash="dash", line_color="red",
+                       opacity=0.5, annotation_text="Crítico", annotation_position="right")
+        fig3.update_layout(
+            yaxis=dict(title="Risco (%)", range=[0, 100], gridcolor='rgba(200,200,200,0.3)'),
+            xaxis=dict(title="Tempo", gridcolor='rgba(200,200,200,0.2)'),
+            margin=dict(t=10, b=40, l=60, r=10), height=260,
+            showlegend=False, plot_bgcolor='white',
+        )
+        st.plotly_chart(fig3, width='content')
+
 with tab2:
     df_w = df[df['Wellness'].notna()].copy()
     if df_w.empty:
@@ -173,11 +223,25 @@ with tab2:
                 continue
             if not (0 <= w <= 100):
                 continue
-            icone = "🟢" if w >= 70 else "🟡" if w >= 40 else "🔴"
-            col_a, col_b = st.columns([1, 5])
+            icone_w = "🟢" if w >= 70 else "🟡" if w >= 40 else "🔴"
+
+            # Burnout por pessoa
+            try:
+                b = float(row['BurnoutRisk']) if pd.notna(row.get('BurnoutRisk')) else None
+            except (ValueError, TypeError, KeyError):
+                b = None
+            if b is not None:
+                icone_b = "🟢" if b < 25 else "🟡" if b < 50 else "🟠" if b < 75 else "🔴"
+                burnout_txt = f"Burnout: {icone_b} {b:.0f}%"
+            else:
+                burnout_txt = ""
+
+            col_a, col_b = st.columns([2, 5])
             with col_a:
-                st.markdown(f"**{row['PessoaID']}** {icone}")
-                st.caption(f"{w:.1f} / 100")
+                st.markdown(f"**{row['PessoaID']}** {icone_w}")
+                st.caption(f"Wellness: {w:.1f}/100")
+                if burnout_txt:
+                    st.caption(burnout_txt)
             with col_b:
                 st.progress(int(w))
 
