@@ -4,6 +4,9 @@ from collections import Counter, deque
 import pandas as pd
 import datetime
 import os
+import sys
+import json
+import logging
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -12,16 +15,77 @@ import platform
 
 # ─── Configurações ──────────────────────────────────────────────────────────────
 
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+logger = logging.getLogger("monitoramento")
+
 LOG_FILE = "monitoramento_emocional.csv"
-LIMITE_ALERTA_SEGUNDOS = 180
+CONFIG_FILE = "config_monitoramento.json"
 FRAMES_PISCAR = 3
-LIMIAR_PISCADAS_MIN = 25
 CSV_BUFFER_SIZE = 32  # Escreve a cada 32 registros (≈4 segundos)
 
-# Limiares de risco de burnout (0-100)
-LIMIAR_BURNOUT_BAIXO    = 25
-LIMIAR_BURNOUT_MODERADO = 50
-LIMIAR_BURNOUT_ALTO     = 75
+DEFAULT_CONFIG = {
+    "limiares": {
+        "alerta_segundos": 180,
+        "piscadas_min": 25,
+        "burnout_baixo": 25,
+        "burnout_moderado": 50,
+        "burnout_alto": 75,
+    },
+    "pesos_wellness": {
+        "happy": 1.0,
+        "neutral": -0.1,
+        "surprise": 0.2,
+        "sad": -0.6,
+        "fear": -0.7,
+        "disgust": -0.5,
+        "angry": -0.8,
+    },
+}
+
+
+def carregar_configuracoes():
+    """Carrega configuração externa e aplica fallback seguro para defaults."""
+    if not os.path.isfile(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+            logger.info(f"Arquivo de configuração criado: {CONFIG_FILE}")
+        except Exception as e:
+            logger.warning(f"Falha ao criar {CONFIG_FILE}: {e}")
+        return {
+            "limiares": dict(DEFAULT_CONFIG["limiares"]),
+            "pesos_wellness": dict(DEFAULT_CONFIG["pesos_wellness"]),
+        }
+
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            user_cfg = json.load(f)
+
+        return {
+            "limiares": {
+                **DEFAULT_CONFIG["limiares"],
+                **user_cfg.get("limiares", {}),
+            },
+            "pesos_wellness": {
+                **DEFAULT_CONFIG["pesos_wellness"],
+                **user_cfg.get("pesos_wellness", {}),
+            },
+        }
+    except Exception as e:
+        logger.warning(f"Falha ao ler {CONFIG_FILE}; usando defaults. Motivo: {e}")
+        return {
+            "limiares": dict(DEFAULT_CONFIG["limiares"]),
+            "pesos_wellness": dict(DEFAULT_CONFIG["pesos_wellness"]),
+        }
+
+
+CONFIG = carregar_configuracoes()
+
+LIMITE_ALERTA_SEGUNDOS = int(CONFIG["limiares"]["alerta_segundos"])
+LIMIAR_PISCADAS_MIN = int(CONFIG["limiares"]["piscadas_min"])
+LIMIAR_BURNOUT_BAIXO = float(CONFIG["limiares"]["burnout_baixo"])
+LIMIAR_BURNOUT_MODERADO = float(CONFIG["limiares"]["burnout_moderado"])
+LIMIAR_BURNOUT_ALTO = float(CONFIG["limiares"]["burnout_alto"])
 
 EMOCAO_MAP = {
     'happy':    ('Feliz',    (0, 220, 0)),
@@ -36,8 +100,13 @@ EMOCAO_MAP = {
 EMOCOES_NEGATIVAS = {'sad', 'angry', 'fear', 'disgust'}
 
 PESOS_WELLNESS = {
-    'happy': 1.0, 'neutral': 0.0, 'surprise': 0.2,
-    'sad': -0.6, 'fear': -0.7, 'disgust': -0.5, 'angry': -0.8,
+    'happy': float(CONFIG["pesos_wellness"]["happy"]),
+    'neutral': float(CONFIG["pesos_wellness"]["neutral"]),
+    'surprise': float(CONFIG["pesos_wellness"]["surprise"]),
+    'sad': float(CONFIG["pesos_wellness"]["sad"]),
+    'fear': float(CONFIG["pesos_wellness"]["fear"]),
+    'disgust': float(CONFIG["pesos_wellness"]["disgust"]),
+    'angry': float(CONFIG["pesos_wellness"]["angry"]),
 }
 
 face_cascade = cv2.CascadeClassifier(
@@ -58,10 +127,10 @@ def inicializar_csv():
             if cabecalho != COLUNAS_CSV:
                 backup = LOG_FILE.replace('.csv', '_backup.csv')
                 os.rename(LOG_FILE, backup)
-                print(f"Formato antigo salvo em: {backup}")
+                logger.warning(f"Formato antigo salvo em: {backup}")
                 pd.DataFrame(columns=COLUNAS_CSV).to_csv(LOG_FILE, index=False)
         except Exception as e:
-            print(f"Erro ao validar CSV: {e}")
+            logger.error(f"Erro ao validar CSV: {e}")
             pd.DataFrame(columns=COLUNAS_CSV).to_csv(LOG_FILE, index=False)
     else:
         pd.DataFrame(columns=COLUNAS_CSV).to_csv(LOG_FILE, index=False)
@@ -71,8 +140,8 @@ inicializar_csv()
 # Inicializa câmera
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
-    print("ERRO: Câmera não encontrada. Verifique a conexão.")
-    exit(1)
+    logger.error("Câmera não encontrada. Verifique a conexão.")
+    sys.exit(1)
 
 # ─── Funções auxiliares ──────────────────────────────────────────────────────────
 
@@ -131,7 +200,7 @@ def detectar_olhos(face_roi):
         return len(olhos) > 0
     except Exception as e:
         if not getattr(detectar_olhos, '_erro_reportado', False):
-            print(f"Aviso: falha na detecao de olhos ({e}).")
+            logger.warning(f"Falha na detecção de olhos ({e}).")
             detectar_olhos._erro_reportado = True
         return False
 
@@ -143,7 +212,7 @@ def salvar_registros_csv(registros):
                 LOG_FILE, mode='a', header=False, index=False
             )
         except Exception as e:
-            print(f"Erro ao salvar CSV: {e}")
+            logger.error(f"Erro ao salvar CSV: {e}")
 
 def gerar_relatorio(emotion_counter, wellness, piscadas_total, burnout_risk=0.0):
     total = sum(emotion_counter.values())
@@ -392,7 +461,7 @@ try:
                 except Exception as e:
                     erros_deepface += 1
                     if erros_deepface <= 3 or erros_deepface % 50 == 0:
-                        print(f"Aviso: falha na analise emocional ({erros_deepface}): {e}")
+                        logger.warning(f"Falha na análise emocional ({erros_deepface}): {e}")
 
             # Renderização
             if modo_privacidade and face_roi.size > 0:
@@ -454,17 +523,6 @@ except KeyboardInterrupt:
     print("\n⏹ Monitoramento interrompido pelo usuário")
 finally:
     # Salva registros restantes no buffer
-    if buffer_csv:
-        salvar_registros_csv(buffer_csv)
-    
-    cap.release()
-    cv2.destroyAllWindows()
-
-    # ─── Relatório Final ─────────────────────────────────────────────────────────────
-    emotion_global = tracker.emotion_counter_global()
-    wellness_final = calcular_wellness(emotion_global)
-    burnout_final  = calcular_risco_burnout(emotion_global, tracker.alertas_fadiga_total())
-    gerar_relatorio(emotion_global, wellness_final, tracker.piscadas_total(), burnout_final)    # Salva registros restantes no buffer
     if buffer_csv:
         salvar_registros_csv(buffer_csv)
     

@@ -1,0 +1,18 @@
+{
+  "limiares": {
+    "alerta_segundos": 180,
+    "piscadas_min": 25,
+    "burnout_baixo": 25,
+    "burnout_moderado": 50,
+    "burnout_alto": 75
+  },
+  "pesos_wellness": {
+    "happy": 1.0,
+    "neutral": -0.1,
+    "surprise": 0.2,
+    "sad": -0.6,
+    "fear": -0.7,
+    "disgust": -0.5,
+    "angry": -0.8
+  }
+}
