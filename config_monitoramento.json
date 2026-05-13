@@ -4,7 +4,9 @@
     "piscadas_min": 25,
     "burnout_baixo": 25,
     "burnout_moderado": 50,
-    "burnout_alto": 75
+    "burnout_alto": 75,
+    "perclos_alerta": 15.0,
+    "perclos_janela_segundos": 60
   },
   "pesos_wellness": {
     "happy": 1.0,
@@ -24,6 +26,16 @@
     "janela_segundos": 12,
     "amostras_minimas": 30,
     "bpm_min": 45,
-    "bpm_max": 180
+    "bpm_max": 180,
+    "qualidade_minima": 0.04
+  },
+  "calibracao": {
+    "ear_segundos": 10,
+    "ear_amostras_minimas": 30,
+    "bpm_atraso_segundos": 20,
+    "bpm_segundos": 30,
+    "bpm_default": 75.0
   }
+
+
 }
