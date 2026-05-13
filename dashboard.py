@@ -64,13 +64,17 @@ def carregar_dados():
         return None
     df['Emotion_PT'] = df['Emotion'].map(EMOCAO_MAP)
 
-    if 'PessoaID'    not in df.columns: df['PessoaID']    = 'P0'
-    if 'Confidence'  not in df.columns: df['Confidence']  = None
-    if 'Wellness'    not in df.columns: df['Wellness']    = None
-    if 'BurnoutRisk' not in df.columns: df['BurnoutRisk'] = None
+    if 'PessoaID'       not in df.columns: df['PessoaID']       = 'P0'
+    if 'Confidence'     not in df.columns: df['Confidence']     = None
+    if 'Wellness'       not in df.columns: df['Wellness']       = None
+    if 'BurnoutRisk'    not in df.columns: df['BurnoutRisk']    = None
+    if 'HeartRateBPM'   not in df.columns: df['HeartRateBPM']   = None
+    if 'HeartRateQuality' not in df.columns: df['HeartRateQuality'] = None
 
     df['Wellness'] = pd.to_numeric(df['Wellness'], errors='coerce')
     df['BurnoutRisk'] = pd.to_numeric(df['BurnoutRisk'], errors='coerce')
+    df['HeartRateBPM'] = pd.to_numeric(df['HeartRateBPM'], errors='coerce')
+    df['HeartRateQuality'] = pd.to_numeric(df['HeartRateQuality'], errors='coerce')
 
     return df
 
@@ -116,7 +120,11 @@ burnout_cor   = "normal" if burnout < LIMIAR_BURNOUT_BAIXO else "off" if burnout
 wellness_status  = "Bom"      if wellness >= 70 else "Atenção" if wellness >= 40 else "Crítico"
 wellness_d_color = "normal"   if wellness >= 70 else "off"     if wellness >= 40 else "inverse"
 
-c1, c2, c3, c4, c5 = st.columns(5)
+hr_ultima = None
+if df['HeartRateBPM'].notna().any():
+    hr_ultima = round(float(df['HeartRateBPM'].dropna().iloc[-1]), 1)
+
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 with c1:
     st.metric("Total de análises", total)
 with c2:
@@ -129,6 +137,8 @@ with c4:
 with c5:
     st.metric("Risco de Burnout", f"{burnout_nivel} ({burnout:.0f}%)",
               delta=burnout_nivel, delta_color=burnout_cor)
+with c6:
+    st.metric("FC via rPPG", f"{hr_ultima:.0f} bpm" if hr_ultima is not None else "—")
 
 st.divider()
 
@@ -255,8 +265,8 @@ with tab2:
 
 with tab3:
     st.subheader("Últimas 20 análises")
-    df_show = df.tail(20)[['Timestamp', 'PessoaID', 'Emotion_PT', 'Confidence', 'Wellness']].copy()
-    df_show.columns = ['Horário', 'Pessoa', 'Emoção', 'Confiança (%)', 'Wellness']
+    df_show = df.tail(20)[['Timestamp', 'PessoaID', 'Emotion_PT', 'Confidence', 'Wellness', 'BurnoutRisk', 'HeartRateBPM', 'HeartRateQuality']].copy()
+    df_show.columns = ['Horário', 'Pessoa', 'Emoção', 'Confiança (%)', 'Wellness', 'Burnout (%)', 'FC rPPG', 'Qualidade']
     st.dataframe(df_show.iloc[::-1], width='content', hide_index=True)
 
 st.divider()

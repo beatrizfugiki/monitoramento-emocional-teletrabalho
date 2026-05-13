@@ -18,11 +18,13 @@ A ideia central é simples: o script de captura gera os dados e o dashboard cons
 O arquivo `projeto-monitoramento-emocional-teletrabalho.py` é o motor do sistema. Ele:
 
 - abre a câmera com OpenCV;
-- detecta rostos com classificadores Haar;
+- detecta rostos com YOLO;
+- usa MediaPipe Face Mesh para estimar olhos abertos/fechados e estabilizar regiões da face;
 - usa a biblioteca DeepFace para classificar a emoção dominante;
 - suaviza decisões com um pequeno buffer de emoções por pessoa;
 - calcula um score de wellness com base no peso de cada emoção;
-- estima risco de burnout combinando emoções negativas, wellness e fadiga ocular;
+- estima frequência cardíaca por rPPG via webcam;
+- estima risco de burnout combinando emoções negativas, wellness, fadiga ocular e frequência cardíaca;
 - grava cada leitura no CSV.
 
 Além disso, o script mantém estado por pessoa com um rastreador simples de centros faciais, para tentar acompanhar indivíduos diferentes ao longo do tempo.
@@ -100,11 +102,17 @@ O projeto depende principalmente de:
 
 - `opencv-python`
 - `deepface`
+- `ultralytics`
+- `mediapipe`
 - `pandas`
 - `numpy`
 - `matplotlib`
 - `streamlit`
 - `plotly`
+
+O detector de rostos espera um modelo YOLO compatível com faces. O arquivo de configuração usa `yolov8n-face.pt` por padrão; se você preferir outro peso, ajuste a seção `detector_rosto` em `config_monitoramento.json`.
+
+A estimativa de frequência cardíaca por rPPG depende de boa iluminação, pouca movimentação e uma face bem visível. Se o ambiente não tiver `mediapipe`, o script usa fallback para a detecção de olhos, mas o rPPG fica degradado.
 
 Se faltar alguma dependência no ambiente, instale com `pip`.
 
