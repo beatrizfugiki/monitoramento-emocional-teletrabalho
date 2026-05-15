@@ -6,6 +6,11 @@ import datetime
 import os
 import time
 
+# Novas bibliotecas para a Matriz de Confusão
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+
 LOG_FILE = "monitoramento_emocional.csv"
 
 EMOCAO_MAP = {
@@ -70,6 +75,7 @@ def carregar_dados():
     if 'BurnoutRisk'    not in df.columns: df['BurnoutRisk']    = None
     if 'HeartRateBPM'   not in df.columns: df['HeartRateBPM']   = None
     if 'HeartRateQuality' not in df.columns: df['HeartRateQuality'] = None
+    if 'Emotion_Real'   not in df.columns: df['Emotion_Real']   = None
 
     df['Wellness'] = pd.to_numeric(df['Wellness'], errors='coerce')
     df['BurnoutRisk'] = pd.to_numeric(df['BurnoutRisk'], errors='coerce')
@@ -143,7 +149,7 @@ with c6:
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📊  Gráficos", "👥  Por Pessoa", "📋  Registros"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊  Gráficos", "👥  Por Pessoa", "📋  Registros", "🎯 Matriz de Confusão"])
 
 with tab1:
     col_esq, col_dir = st.columns(2)
@@ -268,6 +274,53 @@ with tab3:
     df_show = df.tail(20)[['Timestamp', 'PessoaID', 'Emotion_PT', 'Confidence', 'Wellness', 'BurnoutRisk', 'HeartRateBPM', 'HeartRateQuality']].copy()
     df_show.columns = ['Horário', 'Pessoa', 'Emoção', 'Confiança (%)', 'Wellness', 'Burnout (%)', 'FC rPPG', 'Qualidade']
     st.dataframe(df_show.iloc[::-1], width='content', hide_index=True)
+
+with tab4:
+    st.subheader("Análise de Erros e Acertos (Validação Real do Modelo)")
+    st.write("Esta matriz compara o que o modelo detectou com os testes controlados anotados manualmente.")
+    
+    try:
+        # Tenta carregar o arquivo CSV com o gabarito
+        df_validacao = pd.read_csv("dados_validacao.csv") 
+        
+        # Filtra para ter certeza de que tem as colunas e limpa linhas vazias do loop
+        df_validacao = df_validacao.dropna(subset=['Emotion', 'Emotion_Real'])
+        df_validacao = df_validacao[df_validacao['Emotion_Real'].astype(str).str.strip() != ""]
+        
+        # AJUSTE NECESSÁRIO: Verifica se sobrou pelo menos 1 amostra para evitar o ValueError
+        if df_validacao.empty:
+            st.warning("⚠️ O arquivo existe, mas nenhuma linha possui dados de validação reais salvos ainda.")
+            st.info("💡 **Como resolver:** Enquanto testa a câmera, clique na janela do vídeo e aperte os números **1 a 5** para gravar gabaritos. Quando houver logs anotados, a matriz aparecerá aqui automaticamente!")
+        else:
+            # Converte as siglas em inglês para português para o gráfico
+            y_previsto = df_validacao['Emotion'].map(EMOCAO_MAP)
+            y_real = df_validacao['Emotion_Real'].map(EMOCAO_MAP)
+            emocoes_matriz = ['Raiva', 'Desgosto', 'Medo', 'Feliz', 'Neutro', 'Triste', 'Surpresa']
+
+            # Gera a matriz de confusão
+            cm = confusion_matrix(y_real, y_previsto, labels=emocoes_matriz)
+
+            fig_cm, ax_cm = plt.subplots(figsize=(8, 6))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                        xticklabels=emocoes_matriz, yticklabels=emocoes_matriz,
+                        cbar=True, square=True, ax=ax_cm)
+
+            ax_cm.set_ylabel('Emoção Real (Gabarito do Teste)', fontweight='bold')
+            ax_cm.set_xlabel('Emoção Prevista (Percebida pelo Modelo)', fontweight='bold')
+            plt.xticks(rotation=45)
+            plt.yticks(rotation=0)
+            plt.tight_layout()
+
+            # Renderiza o gráfico
+            st.pyplot(fig_cm)
+        
+    except FileNotFoundError:
+        st.warning("⚠️ Arquivo **'dados_validacao.csv'** não encontrado.")
+        st.info("Para ver a matriz real, siga os passos:\n"
+                "1. Copie o arquivo `monitoramento_emocional.csv` e renomeie a cópia para `dados_validacao.csv`.\n"
+                "2. Abra no Excel, crie uma coluna chamada `Emotion_Real`.\n"
+                "3. Preencha manualmente o gabarito (o que você realmente sentia) usando as siglas em inglês (happy, sad, neutral, etc).\n"
+                "4. Salve e deixe na mesma pasta deste código.")
 
 st.divider()
 st.caption(

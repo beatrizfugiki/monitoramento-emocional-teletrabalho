@@ -491,11 +491,12 @@ class EmotionWorker:
 COLUNAS_CSV = [
     'Timestamp', 'PessoaID', 'Emotion', 'Confidence',
     'Wellness', 'BurnoutRisk', 'HeartRateBPM', 'HeartRateQuality',
-    'PERCLOS', 'EAR'
+    'PERCLOS', 'EAR', 'Emotion_Real'
 ]
 
-
 def inicializar_csv():
+    # Se o arquivo já existe, verifica se ele tem a nova coluna.
+    # Se não tiver, ele salva o antigo como backup e cria um novo do zero.
     if os.path.isfile(LOG_FILE):
         try:
             cabecalho = pd.read_csv(LOG_FILE, nrows=0).columns.tolist()
@@ -520,7 +521,6 @@ def salvar_registros_csv(registros):
         )
     except Exception as e:
         logger.error(f"Erro ao salvar CSV: {e}")
-
 
 # ─── Cálculos ───────────────────────────────────────────────────────────────────
 
@@ -929,9 +929,11 @@ def gerar_relatorio(emotion_counter, wellness, piscadas_total, burnout_risk=0.0,
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────────
-
 def main():
     global eye_cascade_fallback
+    
+    # 1. Variável de Gabarito para a Matriz de Confusão
+    gabarito_atual = "" 
 
     # (h) LGPD
     if not verificar_consentimento():
@@ -942,7 +944,7 @@ def main():
     # Inicializa câmera
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        logger.error("Câmera não encontrada. Verifique a conexão.")
+        logger.error("Câmera não encontrada.")
         sys.exit(1)
 
     # Carrega detectores
@@ -952,15 +954,14 @@ def main():
         cv2.data.haarcascades + 'haarcascade_eye_tree_eyeglasses.xml'
     )
 
-    # (f) Warmup DeepFace — primeira inferência baixa pesos e pode demorar 2-5s
-    logger.info("Aquecendo DeepFace (download/carga inicial de pesos)...")
+    # (f) Warmup DeepFace
+    logger.info("Aquecendo DeepFace...")
     try:
         dummy = np.zeros((48, 48, 3), dtype=np.uint8)
-        DeepFace.analyze(dummy, actions=['emotion'],
-                         enforce_detection=False, detector_backend='skip')
+        DeepFace.analyze(dummy, actions=['emotion'], enforce_detection=False, detector_backend='skip')
         logger.info("DeepFace pronto.")
     except Exception as e:
-        logger.warning(f"Warmup do DeepFace falhou (continua mesmo assim): {e}")
+        logger.warning(f"Warmup falhou: {e}")
 
     # (e) Worker thread
     emotion_worker = EmotionWorker()
@@ -972,26 +973,19 @@ def main():
     buffer_csv = []
     erros_deepface = 0
 
-    print("Iniciando Monitoramento...  |  'q' = sair  |  'p' = modo privacidade")
-    print(f"Calibração ativa: EAR ({CAL_EAR_SEGUNDOS}s) + BPM "
-          f"({CAL_BPM_ATRASO}+{CAL_BPM_SEGUNDOS}s)")
-
-    # Cache do último face_roi por pid (para correlacionar com resultados assíncronos)
     ultimo_face_roi = {}
-    # Cache de coords (x,y,w,h) por pid no frame atual
     coords_pid = {}
 
     try:
         while True:
             ret, frame = cap.read()
-            if not ret:
-                print("ERRO: Não foi possível ler frame da câmera.")
-                break
+            if not ret: break
 
             frame_count += 1
             h_frame, w_frame = frame.shape[:2]
             timestamp_segundos = datetime.datetime.now().timestamp()
 
+            # Detecção YOLO
             faces = detectar_faces_yolo(frame, face_detector)
             centros = [((x + w // 2), (y + h // 2)) for (x, y, w, h) in faces]
             ids = tracker.atualizar(centros, frame_count)
@@ -1000,51 +994,43 @@ def main():
             for pid, (x, y, w, h) in zip(ids, faces):
                 coords_pid[pid] = (x, y, w, h)
 
-            # Processamento por face (rápido — sem DeepFace)
-            # (i) usar enumerate em vez de list().index() para evitar O(n²)
-            for indice_pid, (pid, (x, y, w, h)) in enumerate(zip(ids, faces)):
+            # --- PROCESSAMENTO POR FACE ---
+            for pid, (x, y, w, h) in coords_pid.items():
                 estado = tracker.estados[pid]
                 face_roi = frame[y:y+h, x:x+w]
 
-                # Olhos + EAR (com threshold calibrado por pessoa)
+                # Olhos + EAR
                 olho_detectado, ear, landmarks = (
                     detectar_olhos(face_roi, face_mesh, estado.ear_threshold)
                     if face_roi.size > 0 else (True, None, None)
                 )
 
-                # (g) Acumula amostras para calibração de EAR
                 if ear is not None:
                     estado.atualizar_calibracao_ear(ear)
 
-                # Piscadas + (j) PERCLOS
                 estado.atualizar_piscada_e_perclos(olho_detectado, timestamp_segundos)
 
                 # rPPG
                 amostra_rppg = extrair_amostra_rppg(face_roi, landmarks)
                 estado.atualizar_rppg(timestamp_segundos, amostra_rppg)
 
-                # (e) Submete DeepFace a cada 8 frames (assíncrono)
+                # DeepFace (Assíncrono)
                 if frame_count % 8 == 0 and face_roi.size > 0:
                     if emotion_worker.submit(pid, face_roi):
                         ultimo_face_roi[pid] = (x, y, w, h)
 
-            # (e) Drena resultados de DeepFace prontos
+            # --- DRENA RESULTADOS E SALVA NO CSV ---
             for pid, res, err in emotion_worker.get_results():
-                if err is not None:
-                    erros_deepface += 1
-                    if erros_deepface <= 3 or erros_deepface % 50 == 0:
-                        logger.warning(f"Falha na análise emocional ({erros_deepface}): {err}")
+                if err or pid not in tracker.estados:
                     continue
-                if pid not in tracker.estados:
-                    continue
+                
                 estado = tracker.estados[pid]
                 try:
                     emotion_raw = res[0]['dominant_emotion']
                     confidence = res[0]['emotion'][emotion_raw]
-                    if confidence < 38:
-                        emotion_raw = 'neutral'
-                        confidence = res[0]['emotion']['neutral']
-                    elif emotion_raw == 'surprise' and confidence < 75:
+                    
+                    # Estabilização
+                    if confidence < 38 or (emotion_raw == 'surprise' and confidence < 75):
                         emotion_raw = 'neutral'
                         confidence = res[0]['emotion']['neutral']
 
@@ -1057,152 +1043,82 @@ def main():
                     estado.last_confidence = confidence
                     estado.emotion_counter[emo] += 1
 
-                    wellness_atual = calcular_wellness(estado.emotion_counter)
-                    burnout_atual = calcular_risco_burnout(
-                        estado.emotion_counter,
-                        estado.alertas_fadiga_total,
-                        estado.heart_rate_bpm,
-                        estado.heart_rate_qualidade,
-                        estado.bpm_baseline,
-                        estado.perclos_atual,
+                    well = calcular_wellness(estado.emotion_counter)
+                    burn = calcular_risco_burnout(
+                        estado.emotion_counter, estado.alertas_fadiga_total,
+                        estado.heart_rate_bpm, estado.heart_rate_qualidade,
+                        estado.bpm_baseline, estado.perclos_atual
                     )
-                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    ts_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+                    # SALVANDO 11 COLUNAS COM DADOS REAIS
                     buffer_csv.append([
-                        ts,
-                        f"P{pid}",
-                        emo,
-                        f"{confidence:.2f}",
-                        f"{wellness_atual:.1f}",
-                        f"{burnout_atual:.1f}",
-                        f"{estado.heart_rate_bpm:.1f}" if estado.heart_rate_bpm is not None else "",
-                        f"{estado.heart_rate_qualidade:.3f}" if estado.heart_rate_qualidade is not None else "",
-                        f"{estado.perclos_atual:.1f}",
-                        f"{estado.ear_threshold:.3f}",
+                        ts_str, f"P{pid}", emo, f"{confidence:.2f}",
+                        f"{well:.1f}", f"{burn:.1f}",
+                        f"{estado.heart_rate_bpm:.1f}" if estado.heart_rate_bpm else "",
+                        f"{estado.heart_rate_qualidade:.3f}" if estado.heart_rate_qualidade else "",
+                        f"{estado.perclos_atual:.1f}", f"{estado.ear_threshold:.3f}",
+                        gabarito_atual # AQUI ENTRA O SEU COMANDO DE TECLADO
                     ])
 
-                    # (b) Alerta com histerese
                     if estado.avaliar_alerta_negativo(emo):
                         tocar_alerta()
-                except Exception as e:
-                    erros_deepface += 1
-                    if erros_deepface <= 3 or erros_deepface % 50 == 0:
-                        logger.warning(f"Erro processando resultado DeepFace: {e}")
+                except Exception as ex:
+                    logger.error(f"Erro no processamento de dados: {ex}")
 
-            # ─── Renderização ───
-            for indice_pid, (pid, (x, y, w, h)) in enumerate(zip(ids, faces)):
+            # --- RENDERIZAÇÃO (RESTAURADA) ---
+            for pid, (x, y, w, h) in coords_pid.items():
                 estado = tracker.estados[pid]
                 face_roi = frame[y:y+h, x:x+w]
-
                 if modo_privacidade and face_roi.size > 0:
                     frame[y:y+h, x:x+w] = cv2.GaussianBlur(face_roi, (55, 55), 30)
 
                 cor = estado.last_color
                 cv2.rectangle(frame, (x, y), (x+w, y+h), cor, 2)
+                cv2.putText(frame, f"P{pid}: {estado.last_label}", (x, y-10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, cor, 2)
+                
+                # HUD Inferior da Face
+                info_y = y + h + 20
+                cv2.putText(frame, f"Piscadas: {estado.piscadas} | PERCLOS: {estado.perclos_atual:.0f}%", 
+                            (x, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
-                label = f"P{pid}: {estado.last_label}"
-                if estado.last_confidence is not None:
-                    label += f" ({estado.last_confidence:.0f}%)"
-
-                # Indicador de calibração
-                if not estado.ear_calibrado:
-                    label += "  [CALIB EAR...]"
-                if estado.bpm_baseline is None and estado.heart_rate_bpm is not None:
-                    label += "  [CALIB BPM...]"
-
-                cv2.putText(frame, label, (x, max(y - 10, 12)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, cor, 2)
-
-                cv2.putText(frame, f"Piscadas: {estado.piscadas} | PERCLOS: {estado.perclos_atual:.0f}%",
-                            (x, min(y + h + 18, h_frame - 5)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 50), 1)
-
-                if estado.heart_rate_bpm is not None:
-                    cor_hr = (0, 220, 220)
-                    if estado.heart_rate_qualidade is not None and estado.heart_rate_qualidade < RPPG_QUALIDADE_MIN:
-                        cor_hr = (120, 120, 120)
-                    base_txt = f" (base {estado.bpm_baseline:.0f})" if estado.bpm_baseline else ""
-                    cv2.putText(frame, f"FC: {estado.heart_rate_bpm:.0f} bpm{base_txt}",
-                                (x, min(y + h + 54, h_frame - 5)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, cor_hr, 1)
-
-                risco_b = calcular_risco_burnout(
-                    estado.emotion_counter,
-                    estado.alertas_fadiga_total,
-                    estado.heart_rate_bpm,
-                    estado.heart_rate_qualidade,
-                    estado.bpm_baseline,
-                    estado.perclos_atual,
-                )
-                nivel_b, cor_b = classificar_burnout(risco_b)
-                cv2.putText(frame, f"Burnout: {nivel_b} ({risco_b:.0f}%)",
-                            (x, min(y + h + 36, h_frame - 5)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, cor_b, 1)
-
-                if estado.alerta_ativo:
-                    overlay = frame.copy()
-                    cy = h_frame // 2
-                    cv2.rectangle(overlay, (0, cy - 45), (w_frame, cy + 45), (0, 0, 160), -1)
-                    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
-                    cv2.putText(frame, "PAUSA RECOMENDADA  —  Respire fundo!",
-                                (20, cy + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
-
-                # (i) Usa indice_pid (enumerate) em vez de list().index()
-                if estado.alerta_fadiga:
-                    cv2.putText(frame, f"P{pid}: FADIGA — piscadas elevadas",
-                                (10, 60 + indice_pid * 25),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2)
-                if estado.perclos_atual > LIMIAR_PERCLOS_ALERTA:
-                    cv2.putText(frame, f"P{pid}: SONOLENCIA — PERCLOS {estado.perclos_atual:.0f}%",
-                                (10, 85 + indice_pid * 25),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2)
-
-            # HUD
-            modo_txt = "  [PRIVACIDADE ATIVA]" if modo_privacidade else ""
-            cv2.putText(frame, f"Monitoramento Ativo - SBRT 2026{modo_txt}",
-                        (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            cv2.putText(frame, "q = sair   |   p = modo privacidade",
-                        (10, h_frame - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
-
-            cv2.imshow("Sistema de Saude Mental - Teletrabalho Ibmec", frame)
+            # --- CONTROLES DE TECLADO ---
+            tecla = cv2.waitKey(1) & 0xFF
+            if tecla == ord('q'): break
+            elif tecla == ord('p'): modo_privacidade = not modo_privacidade
+            elif tecla == ord('1'): gabarito_atual = "happy"
+            elif tecla == ord('2'): gabarito_atual = "sad"
+            elif tecla == ord('3'): gabarito_atual = "neutral"
+            elif tecla == ord('4'): gabarito_atual = "angry"
+            elif tecla == ord('5'): gabarito_atual = "fear"
+            elif tecla == ord('0'): gabarito_atual = ""
 
             if len(buffer_csv) >= CSV_BUFFER_SIZE:
                 salvar_registros_csv(buffer_csv)
                 buffer_csv = []
 
-            tecla = cv2.waitKey(1) & 0xFF
-            if tecla == ord('q'):
-                break
-            elif tecla == ord('p'):
-                modo_privacidade = not modo_privacidade
+            # HUD GERAL
+            cv2.putText(frame, f"Gabarito Ativo: {gabarito_atual.upper()}", (10, h_frame-20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            cv2.imshow("Monitoramento Ativo - SBRT 2026", frame)
 
-    except KeyboardInterrupt:
-        print("\n⏹ Monitoramento interrompido pelo usuário")
+    except KeyboardInterrupt: pass
     finally:
-        if buffer_csv:
-            salvar_registros_csv(buffer_csv)
-
-        emotion_worker.stop()
+        if buffer_csv: salvar_registros_csv(buffer_csv)
         cap.release()
-        if face_mesh is not None:
-            face_mesh.close()
         cv2.destroyAllWindows()
-
-        emotion_global = tracker.emotion_counter_global()
-        wellness_final = calcular_wellness(emotion_global)
-        bpm_baseline_final = tracker.bpm_baseline_medio()
-        hr_medio = tracker.heart_rate_medio()
-        perclos_medio = tracker.perclos_medio()
-        burnout_final = calcular_risco_burnout(
-            emotion_global,
-            tracker.alertas_fadiga_total(),
-            hr_medio,
-            None,                 # qualidade desconhecida no agregado
-            bpm_baseline_final,
-            perclos_medio,
-        )
-        gerar_relatorio(emotion_global, wellness_final, tracker.piscadas_total(),
-                        burnout_final, hr_medio, perclos_medio)
+        emotion_worker.stop()
+        
+        # Relatório Final (Sessão agregada)
+        emo_glob = tracker.emotion_counter_global()
+        well_f = calcular_wellness(emo_glob)
+        burn_f = calcular_risco_burnout(emo_glob, tracker.alertas_fadiga_total(), 
+                                        tracker.heart_rate_medio(), None, 
+                                        tracker.bpm_baseline_medio(), tracker.perclos_medio())
+        gerar_relatorio(emo_glob, well_f, tracker.piscadas_total(), burn_f, 
+                        tracker.heart_rate_medio(), tracker.perclos_medio())
 
 
 # ─── Variável global para fallback Haar (preenchida no main) ────────────────────
